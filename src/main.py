@@ -14,13 +14,8 @@ REDIS_PORT = 6379
 STREAM_PREFIX = "prices:"
 ALGOS_STREAMS = "algos"
 
-def process(instrument, r, raw, purple, precision, ttl):
+def process(instrument, r, data, purple, precision, ttl):
 
-    # Convert raw JSON to dict
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f" JSON decode error for key={key}: {e}")
 
     # convert string timestamp to datetime
     timestamp = data.get('timestamp')
@@ -111,13 +106,25 @@ def main():
 
     # read existing keys and track seen ones
     seen = set()
+    items = []
     for key in r.scan_iter(f"{stream_key}:*"):
         seen.add(key)
-        print(f"found key={key!r}")
+        # print(f"found key={key!r}")
         raw = r.get(key)
-        print(f" raw value: {raw!r}")
+        # Convert raw JSON to dict
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f" JSON decode error for key={key}: {e}")
+        
+        items.append(data)
 
-        process(instrument, r, raw, purple, precision, ttl)
+    # Sort items based on timestamp in the dict
+    items.sort(key=lambda x: x["timestamp"])
+    print(items)
+
+    for item in items:
+        process(instrument, r, item, purple, precision, ttl)
 
     print("waiting for new keys... (Ctrl-C to exit)")
 
@@ -133,8 +140,13 @@ def main():
                 # print(f"new key={key!r}")
                 raw = r.get(key)
                 # print(f" raw value: {raw!r}")
+                # Convert raw JSON to dict
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as e:
+                    print(f" JSON decode error for key={key}: {e}")
 
-                process(instrument, r, raw, purple, precision, ttl)
+                process(instrument, r, data, purple, precision, ttl)
 
                 # try:
                 #     data = json.loads(raw)
