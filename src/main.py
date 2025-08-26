@@ -26,7 +26,8 @@ from algo import TimeBasedStreamingMA
 
 REDIS_HOST = "localhost"
 REDIS_PORT = 6379
-STREAM_PREFIX = "price_data:"
+STREAM_PREFIX = "prices:"
+SIGNALS_STREAM = "signals"
 
 
 def _extract_price_payload_from_stream_fields(fields: dict) -> Optional[dict]:
@@ -58,7 +59,7 @@ def _extract_price_payload_from_stream_fields(fields: dict) -> Optional[dict]:
     return payload
 
 
-def process_price_payload(payload: dict, instrument: str, ma: TimeBasedStreamingMA):
+def process_price_payload(payload: dict, instrument: str, ma: TimeBasedStreamingMA, r: Optional[redis.Redis] = None, signals_stream: str = SIGNALS_STREAM, ttl: Optional[int] = None):
     if not payload:
         return None
     # Normalize keys
@@ -79,10 +80,39 @@ def process_price_payload(payload: dict, instrument: str, ma: TimeBasedStreaming
 
     ma_value = ma.add_data_point(timestamp, float(price))
     print(f"{timestamp} {instrument} price={price} MA={ma_value}")
+
+    # Write result to Redis string keys (signals) if redis client provided.
+    if r is not None:
+        entry = {
+            "instrument": instrument,
+            "timestamp": str(timestamp),
+            "price": str(price),
+            # store MA as JSON so complex objects are supported
+            "ma": ma_value if isinstance(ma_value, (str, int, float)) else ma_value
+        }
+
+        # Per-suffix or per-instrument key provided in signals_stream
+        try:
+            if ttl:
+                r.set(signals_stream, json.dumps(entry), ex=int(ttl))
+            else:
+                r.set(signals_stream, json.dumps(entry))
+        except Exception as exc:
+            print(f"Failed to SET {signals_stream}: {exc}")
+
+        # Also write a consolidated per-instrument key: signals:<instrument>
+        try:
+            consolidated = f"signals:{instrument}"
+            if ttl:
+                r.set(consolidated, json.dumps(entry), ex=int(ttl))
+            else:
+                r.set(consolidated, json.dumps(entry))
+        except Exception as exc:
+            print(f"Failed to SET consolidated {consolidated}: {exc}")
+
     return ma_value
 
-
-def listen(instrument: str, ma_window: str = "5min", ma_type: str = "SMA"):
+def listen(instrument: str, ma_window: str = "5min", ma_type: str = "SMA", ttl: Optional[int] = None):
     r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
     stream_key = f"{STREAM_PREFIX}{instrument}"
     ma = TimeBasedStreamingMA(ma_window, ma_type)
@@ -107,7 +137,9 @@ def listen(instrument: str, ma_window: str = "5min", ma_type: str = "SMA"):
                     for entry_id, fields in entries:
                         last_id = entry_id
                         payload = _extract_price_payload_from_stream_fields(fields)
-                        process_price_payload(payload, instrument, ma)
+                        # Use a per-instrument signals stream for stream-mode
+                        signals_stream = f"signals:{instrument}"
+                        process_price_payload(payload, instrument, ma, r=r, signals_stream=signals_stream, ttl=ttl)
         except KeyboardInterrupt:
             print("Interrupted, exiting stream listener")
             return
@@ -132,7 +164,15 @@ def listen(instrument: str, ma_window: str = "5min", ma_type: str = "SMA"):
                         except Exception:
                             # If it's not JSON, skip
                             payload = None
-                        process_price_payload(payload, instrument, ma)
+                        # derive suffix from key if possible: price_data:<instrument>:<suffix>
+                        parts = key.split(":")
+                        if len(parts) >= 3:
+                            suffix = parts[2]
+                            signals_stream = f"signals:{instrument}:{suffix}"
+                        else:
+                            signals_stream = f"signals:{instrument}"
+
+                        process_price_payload(payload, instrument, ma, r=r, signals_stream=signals_stream, ttl=ttl)
                     finally:
                         # delete processed key to avoid re-processing
                         try:
@@ -153,10 +193,11 @@ def main():
         description="Listen to Redis price stream or per-key price messages and process with TimeBasedStreamingMA."
     )
     parser.add_argument("--instrument", type=str, default="USD_CAD", help="Instrument to listen to (e.g. USD_CAD)")
-    parser.add_argument("--ma_window", type=str, default="5min", help="Moving average window (e.g. 5min, 1H)")
-    parser.add_argument("--ma_type", type=str, default="SMA", help="Type of moving average (SMA, EMA, DEMA, TEMA)")
+    parser.add_argument("--ma_window", type=str, default="15min", help="Moving average window (e.g. 5min, 1H)")
+    parser.add_argument("--ma_type", type=str, default="EMA", help="Type of moving average (SMA, EMA, DEMA, TEMA)")
+    parser.add_argument("--ttl", type=int, default=None, help="TTL in seconds for signals keys (optional)")
     args = parser.parse_args()
-    listen(args.instrument, args.ma_window, args.ma_type)
+    listen(args.instrument, args.ma_window, args.ma_type, ttl=args.ttl)
 
 
 if __name__ == "__main__":
