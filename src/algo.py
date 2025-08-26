@@ -389,7 +389,7 @@ class Algo:
         self.peak_tema_calc = TimeBasedStreamingMA(peak_interval, ma_type='TEMA')
         self.peak_dema_calc = TimeBasedStreamingMA(peak_interval, ma_type='DEMA')
 
-        self.peak_tamplitude_calculator = TimeBasedMovement(range=1)
+        self.peak_tamplitude_calculator = helper.TimeBasedMovement(range=1)
 
         # initialize the json that will hold timestamp price and ema values
         self.base_ema_values = []
