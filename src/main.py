@@ -4,79 +4,49 @@ import time
 from datetime import datetime
 from typing import Optional
 
-import redis
+# import aia_utilities as au
+import aia_utiilities_test as au
 
 import algo
 import broker
 
 REDIS_HOST = "localhost"
 REDIS_PORT = 6379
-STREAM_PREFIX = "prices:"
-ALGOS_STREAMS = "algos"
+PREFIX_INPUT = "prices"
+PREFIX_OUTPUT = "algos"
 
-def process(instrument, r, data, purple, precision, ttl):
-
+def process(row, algo, instrument, precision):
 
     # convert string timestamp to datetime
-    timestamp = data.get('timestamp')
-    if isinstance(timestamp, str):
-        try:
-            timestamp = datetime.fromisoformat(timestamp)
-        except ValueError:
-            try:
-                timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%f")
-            except ValueError as e:
-                print(f" failed to parse timestamp for key={key}: {e}")
-                
-    price = float(data['price'])
+    timestamp = au.string_to_datetime(row.get('timestamp'))
+    price = float(row['price'])
 
-    return_dict = purple.process_row(timestamp, price, precision, say=False)
+    return_dict = algo.process_row(timestamp, price, precision, say=False)
+    print(return_dict)
 
-    # reconvert timestamp in return_dict back to ISO string
-    if isinstance(return_dict, dict):
-        ts_val = return_dict.get('timestamp')
-        if ts_val is not None and not isinstance(ts_val, str):
-            try:
-                # handle pandas.Timestamp
-                if hasattr(ts_val, 'to_pydatetime'):
-                    ts_dt = ts_val.to_pydatetime()
-                else:
-                    ts_dt = ts_val
-                if isinstance(ts_dt, datetime):
-                    return_dict['timestamp'] = ts_dt.isoformat()
-                else:
-                    return_dict['timestamp'] = str(ts_val)
-            except Exception:
-                return_dict['timestamp'] = str(ts_val)
+    timestamp = au.datetime_to_string(return_dict.get('timestamp'))
+    return_dict['timestamp'] = timestamp
 
     # Add to return_dict instrument after timestamp
-    if isinstance(return_dict, dict):
-        # preserve order: timestamp (0), instrument (1), then rest
-        if 'timestamp' in return_dict:
-            new_dict = {}
-            new_dict['timestamp'] = return_dict['timestamp']
-            new_dict['instrument'] = instrument
-            for k, v in return_dict.items():
-                if k in ('timestamp', 'instrument'):
-                    continue
-                new_dict[k] = v
-            return_dict = new_dict
-        else:
-            # no timestamp present, create dict with instrument first
-            new_dict = {'instrument': instrument}
-            for k, v in return_dict.items():
-                new_dict[k] = v
-            return_dict = new_dict
+    # preserve order: timestamp (0), instrument (1), then rest
+    if 'timestamp' in return_dict:
+        new_dict = {}
+        new_dict['timestamp'] = return_dict['timestamp']
+        new_dict['instrument'] = instrument
+        for k, v in return_dict.items():
+            if k in ('timestamp', 'instrument'):
+                continue
+            new_dict[k] = v
+        return_dict = new_dict
+    
+    return return_dict
 
-    # Put the return_dict on the redis stream with prefix algos:
-    if isinstance(return_dict, dict):
-        algos_key = f"{ALGOS_STREAMS}:{instrument}:{return_dict.get('timestamp')}"
-        # set with TTL if provided
-        if ttl is not None:
-            r.set(algos_key, json.dumps(return_dict), ex=ttl)
-        else:
-            r.set(algos_key, json.dumps(return_dict))
-        print(f"wrote algos key={algos_key!r}")
+
+def write_to_redis(r, instrument, return_dict, ttl):
+    # Put the return_dict on the redis stream:
+    ...
+
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -97,127 +67,115 @@ def main():
     purple = algo.Algo(base_interval='15min', slow_interval='30min', aspr_interval='3min', peak_interval='2min')
 
     # connect to the same Redis DB you used to store the key (default 0)
-    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=args.db, decode_responses=True)
-    stream_key = f"{STREAM_PREFIX}{instrument}"
+    r = au.Redis_Utilities(host=REDIS_HOST, port=REDIS_PORT, db=args.db, ttl=ttl)
+    prefix_input = f"{PREFIX_INPUT}:{instrument}:*"
+    prefix_output = f"{PREFIX_OUTPUT}:{instrument}:"
 
-    # print(stream_key)
-    # for v in r.scan_iter(f"{stream_key}:*"):
-    #     print(v)
+    entries = r.read_all(prefix_input)
 
-    # read existing keys and track seen ones
-    seen = set()
-    items = []
-    for key in r.scan_iter(f"{stream_key}:*"):
-        seen.add(key)
-        # print(f"found key={key!r}")
-        raw = r.get(key)
-        # Convert raw JSON to dict
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as e:
-            print(f" JSON decode error for key={key}: {e}")
-        
-        items.append(data)
-
-    # Sort items based on timestamp in the dict
-    items.sort(key=lambda x: x["timestamp"])
-    print(items)
-
-    for item in items:
-        process(instrument, r, item, purple, precision, ttl)
+    for entry in entries:
+        print(entry)
+        a = process(entry, purple, instrument, precision)
+        r.write(prefix_output, a)
+        # process(instrument, r, entry, purple, precision, ttl
 
     print("waiting for new keys... (Ctrl-C to exit)")
+    for entry in r.read_each(prefix_input):
+        print(entry)
+        a = process(entry, purple, instrument, precision)
+        r.write(prefix_output, a)
+    # process(instrument, r, data, purple, precision, ttl)
 
-    # stay in main and wait for new keys to appear
-    try:
-        while True:
-            # small sleep to avoid tight polling loop
-            time.sleep(1)
-            for key in r.scan_iter(f"{stream_key}:*"):
-                if key in seen:
-                    continue
-                seen.add(key)
-                # print(f"new key={key!r}")
-                raw = r.get(key)
-                # print(f" raw value: {raw!r}")
-                # Convert raw JSON to dict
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError as e:
-                    print(f" JSON decode error for key={key}: {e}")
+    # # stay in main and wait for new keys to appear
+    # try:
+    #     while True:
+    #         # small sleep to avoid tight polling loop
+    #         time.sleep(1)
+    #         for key in r.scan_iter(f"{stream_key}:*"):
+    #             if key in seen:
+    #                 continue
+    #             seen.add(key)
+    #             # print(f"new key={key!r}")
+    #             raw = r.get(key)
+    #             # print(f" raw value: {raw!r}")
+    #             # Convert raw JSON to dict
+    #             try:
+    #                 data = json.loads(raw)
+    #             except json.JSONDecodeError as e:
+    #                 print(f" JSON decode error for key={key}: {e}")
 
-                process(instrument, r, data, purple, precision, ttl)
+    #             process(instrument, r, data, purple, precision, ttl)
 
-                # try:
-                #     data = json.loads(raw)
-                # except json.JSONDecodeError as e:
-                #     print(f" JSON decode error for key={key}: {e}")
-                #     continue
-                # # print(data)
+    #             try:
+    #                 data = json.loads(raw)
+    #             except json.JSONDecodeError as e:
+    #                 print(f" JSON decode error for key={key}: {e}")
+    #                 continue
+    #             # print(data)
 
-                # # convert string timestamp to datetime
-                # timestamp = data.get('timestamp')
-                # if isinstance(timestamp, str):
-                #     try:
-                #         timestamp = datetime.fromisoformat(timestamp)
-                #     except ValueError:
-                #         try:
-                #             timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%f")
-                #         except ValueError as e:
-                #             print(f" failed to parse timestamp for key={key}: {e}")
-                #             continue
-                # price = float(data['price'])
+    #             # convert string timestamp to datetime
+    #             timestamp = data.get('timestamp')
+    #             if isinstance(timestamp, str):
+    #                 try:
+    #                     timestamp = datetime.fromisoformat(timestamp)
+    #                 except ValueError:
+    #                     try:
+    #                         timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%f")
+    #                     except ValueError as e:
+    #                         print(f" failed to parse timestamp for key={key}: {e}")
+    #                         continue
+    #             price = float(data['price'])
                 
-                # return_dict = purple.process_row(timestamp, price, precision, say=False)
+    #             return_dict = purple.process_row(timestamp, price, precision, say=False)
                 
-                # # reconvert timestamp in return_dict back to ISO string
-                # if isinstance(return_dict, dict):
-                #     ts_val = return_dict.get('timestamp')
-                #     if ts_val is not None and not isinstance(ts_val, str):
-                #         try:
-                #             # handle pandas.Timestamp
-                #             if hasattr(ts_val, 'to_pydatetime'):
-                #                 ts_dt = ts_val.to_pydatetime()
-                #             else:
-                #                 ts_dt = ts_val
-                #             if isinstance(ts_dt, datetime):
-                #                 return_dict['timestamp'] = ts_dt.isoformat()
-                #             else:
-                #                 return_dict['timestamp'] = str(ts_val)
-                #         except Exception:
-                #             return_dict['timestamp'] = str(ts_val)
+    #             # reconvert timestamp in return_dict back to ISO string
+    #             if isinstance(return_dict, dict):
+    #                 ts_val = return_dict.get('timestamp')
+    #                 if ts_val is not None and not isinstance(ts_val, str):
+    #                     try:
+    #                         # handle pandas.Timestamp
+    #                         if hasattr(ts_val, 'to_pydatetime'):
+    #                             ts_dt = ts_val.to_pydatetime()
+    #                         else:
+    #                             ts_dt = ts_val
+    #                         if isinstance(ts_dt, datetime):
+    #                             return_dict['timestamp'] = ts_dt.isoformat()
+    #                         else:
+    #                             return_dict['timestamp'] = str(ts_val)
+    #                     except Exception:
+    #                         return_dict['timestamp'] = str(ts_val)
 
-                # # Add to return_dict instrument after timestamp
-                # if isinstance(return_dict, dict):
-                #     # preserve order: timestamp (0), instrument (1), then rest
-                #     if 'timestamp' in return_dict:
-                #         new_dict = {}
-                #         new_dict['timestamp'] = return_dict['timestamp']
-                #         new_dict['instrument'] = instrument
-                #         for k, v in return_dict.items():
-                #             if k in ('timestamp', 'instrument'):
-                #                 continue
-                #             new_dict[k] = v
-                #         return_dict = new_dict
-                #     else:
-                #         # no timestamp present, create dict with instrument first
-                #         new_dict = {'instrument': instrument}
-                #         for k, v in return_dict.items():
-                #             new_dict[k] = v
-                #         return_dict = new_dict
+    #             # Add to return_dict instrument after timestamp
+    #             if isinstance(return_dict, dict):
+    #                 # preserve order: timestamp (0), instrument (1), then rest
+    #                 if 'timestamp' in return_dict:
+    #                     new_dict = {}
+    #                     new_dict['timestamp'] = return_dict['timestamp']
+    #                     new_dict['instrument'] = instrument
+    #                     for k, v in return_dict.items():
+    #                         if k in ('timestamp', 'instrument'):
+    #                             continue
+    #                         new_dict[k] = v
+    #                     return_dict = new_dict
+    #                 else:
+    #                     # no timestamp present, create dict with instrument first
+    #                     new_dict = {'instrument': instrument}
+    #                     for k, v in return_dict.items():
+    #                         new_dict[k] = v
+    #                     return_dict = new_dict
 
-                # # Put the return_dict on the redis stream with prefix algos:
-                # if isinstance(return_dict, dict):
-                #     algos_key = f"{ALGOS_STREAMS}:{instrument}:{return_dict.get('timestamp')}"
-                #     # set with TTL if provided
-                #     if ttl is not None:
-                #         r.set(algos_key, json.dumps(return_dict), ex=ttl)
-                #     else:
-                #         r.set(algos_key, json.dumps(return_dict))
-                #     print(f"wrote algos key={algos_key!r}")
+    #             # Put the return_dict on the redis stream with prefix algos:
+    #             if isinstance(return_dict, dict):
+    #                 algos_key = f"{ALGOS_STREAMS}:{instrument}:{return_dict.get('timestamp')}"
+    #                 # set with TTL if provided
+    #                 if ttl is not None:
+    #                     r.set(algos_key, json.dumps(return_dict), ex=ttl)
+    #                 else:
+    #                     r.set(algos_key, json.dumps(return_dict))
+    #                 print(f"wrote algos key={algos_key!r}")
 
-    except KeyboardInterrupt:
-        print("exiting")
+    # except KeyboardInterrupt:
+    #     print("exiting")
 
 if __name__ == "__main__":
     main()
