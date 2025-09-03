@@ -4,11 +4,12 @@ import time
 from datetime import datetime
 from typing import Optional
 
-import aia_utilities as au
-# import aia_utiilities_test as au
+# import aia_utilities as au
+import aia_utiilities_test as au 
 
 import algo
 import broker
+import decider
 
 REDIS_HOST = "localhost"
 REDIS_PORT = 6379
@@ -45,9 +46,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Listen to Redis price stream or per-key price messages and process with TimeBasedStreamingMA."
     )
-    parser.add_argument("--instrument", type=str, default="USD_CAD", help="Instrument to listen to (e.g. USD_CAD)")
+    parser.add_argument('--instrument', '--i', type=str, default=None, help="Instrument to listen to (e.g. USD_CAD)")
     parser.add_argument("--db", type=int, default=0, help="Redis DB number")
-    parser.add_argument("--ttl", type=int, default=120, help="TTL in seconds for signals keys (optional)")
+    parser.add_argument("--ttl", type=int, default=14400, help="TTL in seconds for signals keys (optional)")
     args = parser.parse_args()
 
     with open('config/secrets.json', 'r') as f:
@@ -57,6 +58,7 @@ def main():
     ttl = args.ttl
     precision = broker.get_instrument_precision(credentials, instrument)
     purple = algo.Algo(base_interval='15min', slow_interval='30min', aspr_interval='3min', peak_interval='2min')
+    dec = decider.Decider()
 
     # connect to the same Redis DB you used to store the key (default 0)
     r = au.Redis_Utilities(host=REDIS_HOST, port=REDIS_PORT, db=args.db, ttl=ttl)
@@ -68,16 +70,18 @@ def main():
     entries = r.read_all(prefix_input)
 
     for entry in entries:
-        print(entry)
-        a = process(entry, purple, instrument, precision)
-        r.write(prefix_output, a)
+        processed = process(entry, purple, instrument, precision)
+        r.write(prefix_output, processed)
+        print(str(processed)[:120])
 
     print("waiting for new keys... (Ctrl-C to exit)")
     for entry in r.read_each(prefix_input):
-        print(entry)
-        a = process(entry, purple, instrument, precision)
-        r.write(prefix_output, a)
-  
+        processed = process(entry, purple, instrument, precision)
+        processed = dec.decide(processed, say=False)
+        r.write(prefix_output, processed)
+        print(str(processed)[:120]) 
+
+
 
 if __name__ == "__main__":
     main()

@@ -101,6 +101,7 @@ class Redis_Utilities:
         for key in self.redis_db.scan_iter(f"{prefix}:*"):
             try:
                 self.redis_db.delete(key)
+                print(f"Deleted key={key}")
             except Exception as e:
                 print(f"Error deleting key={key}: {e}")
 
@@ -234,7 +235,6 @@ def convert_utc_to_ny(utc_time_str):
     Returns a string formatted as YYYY-MM-DD HH:MM:SS or None on error.
     """
     try:
-        
         return (datetime.fromisoformat(utc_time_str.replace('Z', '+00:00'))
                 .astimezone(pytz.timezone('America/New_York'))
                 .replace(tzinfo=None, microsecond=0)
@@ -253,7 +253,3 @@ def updown(direction):
         str or None: 'up', 'down', or None for no movement.
     """
     return "up" if direction > 0 else "down" if direction < 0 else None
-
-
-
-
