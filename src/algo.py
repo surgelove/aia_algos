@@ -54,14 +54,22 @@ class TimeBasedStreamingMA:
         # Calculate alpha for EMA-based calculations
         if alpha is None:
             # Convert time window to approximate number of periods for alpha calculation
-            # Assume 1-minute base period for alpha calculation
-            minutes = self.time_window.total_seconds() / 60
-            equivalent_periods = max(1, minutes)  # At least 1 period
+            # Use seconds as the base period so the resulting alpha is time-based
+            seconds = max(1.0, self.time_window.total_seconds())
+            equivalent_periods = seconds  # number of 1-second periods in the window
             self.alpha = 2.0 / (equivalent_periods + 1)
         else:
             if not (0 < alpha < 1):
                 raise ValueError("alpha must be between 0 and 1")
             self.alpha = alpha
+        # Compute continuous decay rate lambda so EMA is sampling-invariant.
+        # We assume the discrete alpha is defined per 1-second base period.
+        try:
+            base_period_seconds = 1.0
+            # avoid math domain error if alpha is 1.0
+            self._lambda = -math.log(max(1e-12, 1.0 - self.alpha)) / base_period_seconds
+        except Exception:
+            self._lambda = None
         
         # Initialize data storage - we need to keep all data within time window for SMA
         self.data_points = deque()  # Store (timestamp, price) tuples
@@ -94,27 +102,21 @@ class TimeBasedStreamingMA:
         
         # Calculate time elapsed in seconds
         time_elapsed = (current_timestamp - last_timestamp).total_seconds()
-        
+
         # Handle edge cases
         if time_elapsed <= 0:
             return self.alpha  # No time elapsed, use base alpha
-        
-        # Assume base interval for alpha calculation (e.g., 60 seconds)
-        base_interval = 60.0  # 1 minute
-        
-        # Adjust alpha based on actual time elapsed
-        time_factor = time_elapsed / base_interval
-        
-        # Prevent issues with very small alpha values and large time factors
-        if self.alpha <= 0 or self.alpha >= 1:
-            return self.alpha
-        
-        # Apply time-weighted alpha: more time elapsed = more weight to new data
+
+        # Use continuous-time exponential smoothing: alpha_t = 1 - exp(-dt / tau)
+        # where tau is chosen as the time_window in seconds (min 1s)
         try:
-            adjusted_alpha = 1 - (1 - self.alpha) ** time_factor
-            return min(1.0, max(0.0, adjusted_alpha))  # Clamp between 0 and 1
-        except (ZeroDivisionError, OverflowError, ValueError):
-            # Fallback to base alpha if calculation fails
+            if getattr(self, '_lambda', None):
+                adjusted = 1.0 - math.exp(-self._lambda * time_elapsed)
+            else:
+                tau = max(1.0, self.time_window.total_seconds())
+                adjusted = 1.0 - math.exp(-time_elapsed / tau)
+            return min(1.0, max(0.0, adjusted))
+        except Exception:
             return self.alpha
     
     def add_data_point(self, timestamp, price):
